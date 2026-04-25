@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
+# Tanggal pelaporan otomatis
 REPORTING_DATE = pd.Timestamp("2025-12-31")
 
 
@@ -13,17 +14,37 @@ def calculate_depreciation_monthly(
     capitalizations=None,
     corrections=None
 ):
+    """
+    Logika:
+    - Penyusutan dimulai pada bulan perolehan
+    - Kapitalisasi diproses pada bulan kapitalisasi
+    - Koreksi diproses pada bulan koreksi
+    - Tambahan usia diinput dalam TAHUN, lalu dikonversi menjadi BULAN
+    - Sisa masa manfaat maksimum = masa manfaat awal/induk
+    """
     if capitalizations is None:
         capitalizations = []
     if corrections is None:
         corrections = []
 
     acquisition_date = pd.to_datetime(acquisition_date, errors="coerce", dayfirst=True)
-    reporting_date = pd.to_datetime(reporting_date)
+    reporting_date = pd.to_datetime(reporting_date, errors="coerce")
 
-    if pd.isna(acquisition_date) or acquisition_date > reporting_date:
+    if pd.isna(acquisition_date) or pd.isna(reporting_date):
         return []
 
+    if acquisition_date > reporting_date:
+        return []
+
+    # Masa manfaat induk dalam bulan
+    original_life_months = int(float(useful_life_years) * 12)
+    remaining_life_months = original_life_months
+
+    # Nilai buku awal
+    book_value = float(initial_cost)
+    accumulated_dep = 0.0
+
+    # Kelompokkan kapitalisasi per (tahun, bulan)
     cap_dict = {}
     for cap in capitalizations:
         cap_date = pd.to_datetime(cap.get("Tanggal Kapitalisasi"), errors="coerce", dayfirst=True)
@@ -31,18 +52,13 @@ def calculate_depreciation_monthly(
             key = (cap_date.year, cap_date.month)
             cap_dict.setdefault(key, []).append(cap)
 
+    # Kelompokkan koreksi per (tahun, bulan)
     corr_dict = {}
     for corr in corrections:
         corr_date = pd.to_datetime(corr.get("Tanggal Koreksi"), errors="coerce", dayfirst=True)
         if pd.notna(corr_date) and corr_date <= reporting_date:
             key = (corr_date.year, corr_date.month)
             corr_dict.setdefault(key, []).append(corr)
-
-    original_life_months = int(float(useful_life_years) * 12)
-    remaining_life_months = original_life_months
-
-    book_value = float(initial_cost)
-    accumulated_dep = 0.0
 
     current_year = acquisition_date.year
     current_month = acquisition_date.month
@@ -58,28 +74,36 @@ def calculate_depreciation_monthly(
         koreksi_bulan_ini = 0.0
         tambahan_usia_bulan_ini = 0
 
+        # 1. Proses kapitalisasi bulan berjalan
         if current_key in cap_dict:
             for cap in cap_dict[current_key]:
-                jumlah = float(cap.get("Jumlah", 0) or 0)
-                tambahan_usia = float(cap.get("Tambahan Usia", 0) or 0)
+                cap_amount = float(cap.get("Jumlah", 0) or 0)
 
-                kapitalisasi_bulan_ini += jumlah
-                tambahan_usia_bulan_ini += int(tambahan_usia * 12)
+                # Tambahan usia diinput TAHUN -> konversi ke BULAN
+                additional_life_years = float(cap.get("Tambahan Usia", 0) or 0)
+                additional_life_months = int(additional_life_years * 12)
 
+                kapitalisasi_bulan_ini += cap_amount
+                tambahan_usia_bulan_ini += additional_life_months
+
+            # Tambah nilai buku
             book_value += kapitalisasi_bulan_ini
 
+            # Tambah sisa masa manfaat, tapi MAKSIMAL masa manfaat awal/induk
             remaining_life_months = min(
                 remaining_life_months + tambahan_usia_bulan_ini,
                 original_life_months
             )
 
+        # 2. Proses koreksi bulan berjalan
         if current_key in corr_dict:
             for corr in corr_dict[current_key]:
-                jumlah = float(corr.get("Jumlah", 0) or 0)
-                koreksi_bulan_ini += jumlah
+                corr_amount = float(corr.get("Jumlah", 0) or 0)
+                koreksi_bulan_ini += corr_amount
 
             book_value = max(book_value - koreksi_bulan_ini, 0)
 
+        # 3. Hitung penyusutan bulan berjalan
         monthly_dep = 0.0
         if remaining_life_months > 0 and book_value > 0:
             monthly_dep = book_value / remaining_life_months
@@ -92,6 +116,7 @@ def calculate_depreciation_monthly(
             "Bulan": current_month,
             "Periode": f"{current_year}-{current_month:02d}",
             "Kapitalisasi Bulan Ini": round(kapitalisasi_bulan_ini, 2),
+            "Tambahan Usia Bulan Ini": tambahan_usia_bulan_ini,
             "Koreksi Bulan Ini": round(koreksi_bulan_ini, 2),
             "Penyusutan Bulan Berjalan": round(monthly_dep, 2),
             "Akumulasi Penyusutan": round(accumulated_dep, 2),
@@ -100,6 +125,7 @@ def calculate_depreciation_monthly(
             "Sisa Masa Manfaat (Tahun)": round(remaining_life_months / 12, 2),
         })
 
+        # Pindah ke bulan berikutnya
         current_month += 1
         if current_month > 12:
             current_month = 1
@@ -112,9 +138,11 @@ def convert_df_to_excel_with_sheets(results, schedules):
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        # Sheet ringkasan
         results_df = pd.DataFrame(results)
         results_df.to_excel(writer, index=False, sheet_name="Ringkasan")
 
+        # Sheet detail per kode aset
         for asset_code, schedule in schedules.items():
             schedule_df = pd.DataFrame(schedule)
 
@@ -150,17 +178,37 @@ def app():
         3. Unggah file Excel.
 
         **Tanggal pelaporan otomatis: 31 Desember 2025**
+
+        **Format Excel**
+        
+        **Sheet 1 - Data Aset**
+        - Kode Aset
+        - Harga Perolehan Awal (Rp)
+        - Tanggal Perolehan
+        - Masa Manfaat (tahun)
+
+        **Sheet 2 - Kapitalisasi**
+        - Kode Aset
+        - Tanggal Kapitalisasi
+        - Jumlah
+        - Tambahan Usia
+
+        **Sheet 3 - Koreksi**
+        - Kode Aset
+        - Tanggal Koreksi
+        - Jumlah
         """)
 
     st.subheader("📥 Download Template Excel")
     if st.button("⬇️ Download Template Excel"):
-        st.markdown("[Download](https://docs.google.com/spreadsheets/d/1b4bueqvZ0vDn7DtKgNK-uVQojLGMM8vQ/edit?usp=drive_link)")
+        st.info("Template mengikuti format kolom yang dijelaskan di atas.")
 
     uploaded_file = st.file_uploader("📤 Unggah File Excel", type=["xlsx"])
 
     if uploaded_file is not None:
         try:
-            excel_data = pd.ExcelFile(uploaded_file)
+            # Penting: baca xlsx pakai openpyxl
+            excel_data = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
             assets_df = excel_data.parse(sheet_name=0)
             capitalizations_df = excel_data.parse(sheet_name=1)
@@ -172,14 +220,12 @@ def app():
                 "Tanggal Perolehan",
                 "Masa Manfaat (tahun)"
             }
-
             required_caps = {
                 "Kode Aset",
                 "Tanggal Kapitalisasi",
                 "Jumlah",
                 "Tambahan Usia"
             }
-
             required_corrs = {
                 "Kode Aset",
                 "Tanggal Koreksi",
@@ -187,21 +233,23 @@ def app():
             }
 
             if not required_assets.issubset(assets_df.columns):
-                st.error("Kolom di Sheet 1 tidak valid! Kolom wajib: Kode Aset, Harga Perolehan Awal (Rp), Tanggal Perolehan, Masa Manfaat (tahun).")
+                st.error("Kolom di Sheet 1 tidak valid. Wajib: Kode Aset, Harga Perolehan Awal (Rp), Tanggal Perolehan, Masa Manfaat (tahun).")
                 return
 
             if not required_caps.issubset(capitalizations_df.columns):
-                st.error("Kolom di Sheet 2 tidak valid! Kolom wajib: Kode Aset, Tanggal Kapitalisasi, Jumlah, Tambahan Usia.")
+                st.error("Kolom di Sheet 2 tidak valid. Wajib: Kode Aset, Tanggal Kapitalisasi, Jumlah, Tambahan Usia.")
                 return
 
             if not required_corrs.issubset(corrections_df.columns):
-                st.error("Kolom di Sheet 3 tidak valid! Kolom wajib: Kode Aset, Tanggal Koreksi, Jumlah.")
+                st.error("Kolom di Sheet 3 tidak valid. Wajib: Kode Aset, Tanggal Koreksi, Jumlah.")
                 return
 
+            # Normalisasi teks
             assets_df["Kode Aset"] = assets_df["Kode Aset"].astype(str).str.strip()
             capitalizations_df["Kode Aset"] = capitalizations_df["Kode Aset"].astype(str).str.strip()
             corrections_df["Kode Aset"] = corrections_df["Kode Aset"].astype(str).str.strip()
 
+            # Konversi numerik
             assets_df["Harga Perolehan Awal (Rp)"] = pd.to_numeric(
                 assets_df["Harga Perolehan Awal (Rp)"], errors="coerce"
             )
@@ -220,6 +268,7 @@ def app():
                 corrections_df["Jumlah"], errors="coerce"
             )
 
+            # Konversi tanggal
             assets_df["Tanggal Perolehan"] = pd.to_datetime(
                 assets_df["Tanggal Perolehan"], errors="coerce", dayfirst=True
             )
@@ -270,7 +319,6 @@ def app():
 
                 if schedule:
                     last_row = schedule[-1]
-
                     results.append({
                         "Kode Aset": asset_code,
                         "Tanggal Pelaporan": REPORTING_DATE.strftime("%d/%m/%Y"),
@@ -280,18 +328,20 @@ def app():
                         "Nilai Buku Akhir": last_row["Nilai Buku Akhir"],
                         "Sisa Masa Manfaat (Bulan)": last_row["Sisa Masa Manfaat (Bulan)"],
                     })
-
                     schedules[asset_code] = schedule
 
             results_df = pd.DataFrame(results)
 
             if not results_df.empty:
-                st.dataframe(results_df.style.format({
-                    "Penyusutan Bulan Berjalan": "{:,.2f}".format,
-                    "Akumulasi Penyusutan": "{:,.2f}".format,
-                    "Nilai Buku Akhir": "{:,.2f}".format,
-                    "Sisa Masa Manfaat (Bulan)": "{:,.0f}".format,
-                }))
+                st.dataframe(
+                    results_df.style.format({
+                        "Penyusutan Bulan Berjalan": "{:,.2f}",
+                        "Akumulasi Penyusutan": "{:,.2f}",
+                        "Nilai Buku Akhir": "{:,.2f}",
+                        "Sisa Masa Manfaat (Bulan)": "{:,.0f}",
+                    }),
+                    use_container_width=True
+                )
 
                 excel_buffer = convert_df_to_excel_with_sheets(results, schedules)
 
