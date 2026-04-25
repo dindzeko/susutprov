@@ -6,13 +6,6 @@ REPORTING_DATE = pd.Timestamp("2025-12-31")
 
 
 def parse_mixed_excel_date(value):
-    """
-    Menangani:
-    - datetime/Timestamp
-    - teks tanggal biasa: 14-08-2017, 14/08/2017, 2017-08-14
-    - serial date Excel: 42735
-    - string dengan spasi tersembunyi
-    """
     if pd.isna(value):
         return pd.NaT
 
@@ -26,22 +19,19 @@ def parse_mixed_excel_date(value):
 
     try:
         num = float(text)
-        if num > 1000:
-            return pd.Timestamp("1899-12-30") + pd.to_timedelta(num, unit="D")
+        if num > 1000 and text.replace(".", "", 1).isdigit():
+            return pd.Timestamp("1899-12-30") + pd.to_timedelta(int(num), unit="D")
     except Exception:
         pass
+
+    import re
+    if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", text):
+        return pd.to_datetime(text, errors="coerce", yearfirst=True)
 
     return pd.to_datetime(text, errors="coerce", dayfirst=True)
 
 
 def normalize_kode_aset(value):
-    """
-    Menyamakan:
-    211506
-    211506.0
-    ' 211506 '
-    menjadi '211506'
-    """
     if pd.isna(value):
         return pd.NA
 
@@ -75,14 +65,6 @@ def calculate_depreciation_monthly(
     capitalizations=None,
     corrections=None
 ):
-    """
-    Logika:
-    - Penyusutan mulai pada bulan perolehan
-    - Kapitalisasi diproses pada bulan kapitalisasi
-    - Koreksi diproses pada bulan koreksi
-    - Tambahan usia diinput dalam TAHUN -> dikali 12 jadi BULAN
-    - Sisa masa manfaat maksimum = masa manfaat awal/induk
-    """
     if capitalizations is None:
         capitalizations = []
     if corrections is None:
@@ -133,7 +115,6 @@ def calculate_depreciation_monthly(
         if current_key in cap_dict:
             for cap in cap_dict[current_key]:
                 cap_amount = float(cap.get("Jumlah", 0) or 0)
-
                 tambahan_usia_tahun = float(cap.get("Tambahan Usia", 0) or 0)
                 tambahan_usia_bulan = int(tambahan_usia_tahun * 12)
 
@@ -141,7 +122,6 @@ def calculate_depreciation_monthly(
                 tambahan_usia_bulan_ini += tambahan_usia_bulan
 
             book_value += kapitalisasi_bulan_ini
-
             remaining_life_months = min(
                 remaining_life_months + tambahan_usia_bulan_ini,
                 original_life_months
@@ -183,7 +163,7 @@ def calculate_depreciation_monthly(
     return schedule
 
 
-def convert_df_to_excel_with_sheets(results, schedules, skipped_rows=None, total_rows=0):
+def convert_df_to_excel_with_sheets(results, schedules, skipped_rows=None, anomaly_rows=None, total_rows=0):
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
@@ -225,6 +205,7 @@ def convert_df_to_excel_with_sheets(results, schedules, skipped_rows=None, total
 
         processed_rows = len(results)
         skipped_count = len(skipped_rows) if skipped_rows else 0
+        anomaly_count = len(anomaly_rows) if anomaly_rows else 0
 
         ws_reviu.write(0, 0, "Ringkasan Reviu", bold_fmt)
         ws_reviu.write(2, 0, "Jumlah total baris", bold_fmt)
@@ -236,15 +217,31 @@ def convert_df_to_excel_with_sheets(results, schedules, skipped_rows=None, total
         ws_reviu.write(4, 0, "Jumlah baris dilewati", bold_fmt)
         ws_reviu.write(4, 1, skipped_count, int_fmt)
 
-        start_row = 7
-        ws_reviu.write(start_row, 0, "Daftar Baris yang Dilewati", bold_fmt)
+        ws_reviu.write(5, 0, "Jumlah input aset anomali", bold_fmt)
+        ws_reviu.write(5, 1, anomaly_count, int_fmt)
 
-        skipped_df = pd.DataFrame(skipped_rows if skipped_rows else [], columns=["Baris Excel", "Kode Aset", "Alasan"])
-        skipped_df.to_excel(writer, index=False, sheet_name="Reviu Hasil", startrow=start_row + 1)
+        # Tabel baris dilewati
+        start_row_skip = 8
+        ws_reviu.write(start_row_skip, 0, "Daftar Baris yang Dilewati", bold_fmt)
+        skipped_df = pd.DataFrame(
+            skipped_rows if skipped_rows else [],
+            columns=["Baris Excel", "Kode Aset", "Alasan"]
+        )
+        skipped_df.to_excel(writer, index=False, sheet_name="Reviu Hasil", startrow=start_row_skip + 1)
 
-        ws_reviu.set_column("A:A", 15)
-        ws_reviu.set_column("B:B", 20)
-        ws_reviu.set_column("C:C", 60)
+        # Tabel aset anomali
+        start_row_anom = start_row_skip + 3 + max(len(skipped_df), 1)
+        ws_reviu.write(start_row_anom, 0, "Daftar Input Aset Tidak Logis / Anomali", bold_fmt)
+        anomaly_df = pd.DataFrame(
+            anomaly_rows if anomaly_rows else [],
+            columns=["Kode Aset", "Jenis Anomali", "Tanggal Aset", "Tanggal Transaksi", "Keterangan"]
+        )
+        anomaly_df.to_excel(writer, index=False, sheet_name="Reviu Hasil", startrow=start_row_anom + 1)
+
+        ws_reviu.set_column("A:A", 18)
+        ws_reviu.set_column("B:B", 28)
+        ws_reviu.set_column("C:D", 18)
+        ws_reviu.set_column("E:E", 70)
 
     buffer.seek(0)
     return buffer.getvalue()
@@ -322,29 +319,11 @@ def app():
 
         **Tanggal pelaporan otomatis: 31 Desember 2025**
 
-        **Format Excel**
-
-        **Sheet 1 - Data Aset**
-        - Kode Aset
-        - Harga Perolehan Awal (Rp)
-        - Tanggal Perolehan
-        - Masa Manfaat (tahun)
-
-        **Sheet 2 - Kapitalisasi**
-        - Kode Aset
-        - Tanggal Kapitalisasi
-        - Jumlah
-        - Tambahan Usia
-
-        **Sheet 3 - Koreksi**
-        - Kode Aset
-        - Tanggal Koreksi
-        - Jumlah
-
         **Catatan**
         - Sheet Kapitalisasi dan Koreksi boleh kosong.
         - Tambahan Usia diisi dalam tahun. Contoh 4 = 48 bulan.
         - Tambahan usia maksimal sampai masa manfaat awal/induk.
+        - Kapitalisasi/koreksi sebelum tanggal perolehan induk akan dicatat sebagai anomali.
         """)
 
     st.subheader("📥 Download Template Excel")
@@ -463,6 +442,7 @@ def app():
                 return
 
             skipped_rows = []
+            anomaly_rows = []
             results = []
             schedules_dict = {}
             total_rows = len(assets_df)
@@ -516,19 +496,43 @@ def app():
                     })
                     continue
 
+                # Ambil kapitalisasi valid dan catat anomali
+                asset_caps = []
                 if not capitalizations_df.empty:
-                    asset_caps = capitalizations_df[
-                        capitalizations_df["Kode Aset"] == asset_code
-                    ].to_dict("records")
-                else:
-                    asset_caps = []
+                    asset_cap_rows = capitalizations_df[capitalizations_df["Kode Aset"] == asset_code].to_dict("records")
+                    for cap in asset_cap_rows:
+                        cap_date = parse_mixed_excel_date(cap.get("Tanggal Kapitalisasi"))
+                        if pd.isna(cap_date):
+                            continue
+                        if cap_date < acquisition_date:
+                            anomaly_rows.append({
+                                "Kode Aset": asset_code,
+                                "Jenis Anomali": "Kapitalisasi sebelum induk",
+                                "Tanggal Aset": acquisition_date.strftime("%d/%m/%Y"),
+                                "Tanggal Transaksi": cap_date.strftime("%d/%m/%Y"),
+                                "Keterangan": f"Tanggal kapitalisasi lebih awal dari tanggal perolehan aset induk. Nilai: {cap.get('Jumlah', 0)}"
+                            })
+                        else:
+                            asset_caps.append(cap)
 
+                # Ambil koreksi valid dan catat anomali
+                asset_corrs = []
                 if not corrections_df.empty:
-                    asset_corrs = corrections_df[
-                        corrections_df["Kode Aset"] == asset_code
-                    ].to_dict("records")
-                else:
-                    asset_corrs = []
+                    asset_corr_rows = corrections_df[corrections_df["Kode Aset"] == asset_code].to_dict("records")
+                    for corr in asset_corr_rows:
+                        corr_date = parse_mixed_excel_date(corr.get("Tanggal Koreksi"))
+                        if pd.isna(corr_date):
+                            continue
+                        if corr_date < acquisition_date:
+                            anomaly_rows.append({
+                                "Kode Aset": asset_code,
+                                "Jenis Anomali": "Koreksi sebelum induk",
+                                "Tanggal Aset": acquisition_date.strftime("%d/%m/%Y"),
+                                "Tanggal Transaksi": corr_date.strftime("%d/%m/%Y"),
+                                "Keterangan": f"Tanggal koreksi lebih awal dari tanggal perolehan aset induk. Nilai: {corr.get('Jumlah', 0)}"
+                            })
+                        else:
+                            asset_corrs.append(corr)
 
                 schedule = calculate_depreciation_monthly(
                     initial_cost=initial_cost,
@@ -555,7 +559,8 @@ def app():
             st.info(
                 f"Total baris aset: {total_rows} | "
                 f"Berhasil diproses: {len(results)} | "
-                f"Dilewati: {len(skipped_rows)}"
+                f"Dilewati: {len(skipped_rows)} | "
+                f"Anomali: {len(anomaly_rows)}"
             )
 
             results_df = pd.DataFrame(results)
@@ -575,10 +580,15 @@ def app():
                     st.warning(f"Ada {len(skipped_rows)} baris yang dilewati.")
                     st.dataframe(pd.DataFrame(skipped_rows), use_container_width=True)
 
+                if anomaly_rows:
+                    st.warning(f"Ada {len(anomaly_rows)} input aset yang tidak logis / anomali.")
+                    st.dataframe(pd.DataFrame(anomaly_rows), use_container_width=True)
+
                 excel_buffer = convert_df_to_excel_with_sheets(
                     results,
                     schedules_dict,
                     skipped_rows=skipped_rows,
+                    anomaly_rows=anomaly_rows,
                     total_rows=total_rows
                 )
 
