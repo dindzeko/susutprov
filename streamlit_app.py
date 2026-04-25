@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-# Tanggal pelaporan otomatis
 REPORTING_DATE = pd.Timestamp("2025-12-31")
 
 
@@ -14,14 +13,6 @@ def calculate_depreciation_monthly(
     capitalizations=None,
     corrections=None
 ):
-    """
-    Logika:
-    - Penyusutan dimulai pada bulan perolehan
-    - Kapitalisasi diproses pada bulan kapitalisasi
-    - Koreksi diproses pada bulan koreksi
-    - Tambahan usia diinput dalam TAHUN, lalu dikonversi menjadi BULAN
-    - Sisa masa manfaat maksimum = masa manfaat awal/induk
-    """
     if capitalizations is None:
         capitalizations = []
     if corrections is None:
@@ -36,15 +27,12 @@ def calculate_depreciation_monthly(
     if acquisition_date > reporting_date:
         return []
 
-    # Masa manfaat induk dalam bulan
     original_life_months = int(float(useful_life_years) * 12)
     remaining_life_months = original_life_months
 
-    # Nilai buku awal
     book_value = float(initial_cost)
     accumulated_dep = 0.0
 
-    # Kelompokkan kapitalisasi per (tahun, bulan)
     cap_dict = {}
     for cap in capitalizations:
         cap_date = pd.to_datetime(cap.get("Tanggal Kapitalisasi"), errors="coerce", dayfirst=True)
@@ -52,7 +40,6 @@ def calculate_depreciation_monthly(
             key = (cap_date.year, cap_date.month)
             cap_dict.setdefault(key, []).append(cap)
 
-    # Kelompokkan koreksi per (tahun, bulan)
     corr_dict = {}
     for corr in corrections:
         corr_date = pd.to_datetime(corr.get("Tanggal Koreksi"), errors="coerce", dayfirst=True)
@@ -62,7 +49,6 @@ def calculate_depreciation_monthly(
 
     current_year = acquisition_date.year
     current_month = acquisition_date.month
-
     schedule = []
 
     while (current_year < reporting_date.year) or (
@@ -74,28 +60,24 @@ def calculate_depreciation_monthly(
         koreksi_bulan_ini = 0.0
         tambahan_usia_bulan_ini = 0
 
-        # 1. Proses kapitalisasi bulan berjalan
         if current_key in cap_dict:
             for cap in cap_dict[current_key]:
                 cap_amount = float(cap.get("Jumlah", 0) or 0)
 
-                # Tambahan usia diinput TAHUN -> konversi ke BULAN
-                additional_life_years = float(cap.get("Tambahan Usia", 0) or 0)
-                additional_life_months = int(additional_life_years * 12)
+                tambahan_usia_tahun = float(cap.get("Tambahan Usia", 0) or 0)
+                tambahan_usia_bulan = int(tambahan_usia_tahun * 12)
 
                 kapitalisasi_bulan_ini += cap_amount
-                tambahan_usia_bulan_ini += additional_life_months
+                tambahan_usia_bulan_ini += tambahan_usia_bulan
 
-            # Tambah nilai buku
             book_value += kapitalisasi_bulan_ini
 
-            # Tambah sisa masa manfaat, tapi MAKSIMAL masa manfaat awal/induk
+            # Maksimal tidak boleh melebihi masa manfaat awal/induk
             remaining_life_months = min(
                 remaining_life_months + tambahan_usia_bulan_ini,
                 original_life_months
             )
 
-        # 2. Proses koreksi bulan berjalan
         if current_key in corr_dict:
             for corr in corr_dict[current_key]:
                 corr_amount = float(corr.get("Jumlah", 0) or 0)
@@ -103,7 +85,6 @@ def calculate_depreciation_monthly(
 
             book_value = max(book_value - koreksi_bulan_ini, 0)
 
-        # 3. Hitung penyusutan bulan berjalan
         monthly_dep = 0.0
         if remaining_life_months > 0 and book_value > 0:
             monthly_dep = book_value / remaining_life_months
@@ -125,7 +106,6 @@ def calculate_depreciation_monthly(
             "Sisa Masa Manfaat (Tahun)": round(remaining_life_months / 12, 2),
         })
 
-        # Pindah ke bulan berikutnya
         current_month += 1
         if current_month > 12:
             current_month = 1
@@ -134,37 +114,117 @@ def calculate_depreciation_monthly(
     return schedule
 
 
+def safe_sheet_name(name):
+    text = str(name)
+    for ch in ["/", "\\", ":", "*", "?", "[", "]"]:
+        text = text.replace(ch, "_")
+    return text[:31] if text else "Sheet"
+
+
 def convert_df_to_excel_with_sheets(results, schedules):
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        # Sheet ringkasan
         results_df = pd.DataFrame(results)
         results_df.to_excel(writer, index=False, sheet_name="Ringkasan")
 
-        # Sheet detail per kode aset
+        workbook = writer.book
+        money_fmt = workbook.add_format({"num_format": "#,##0.00"})
+        int_fmt = workbook.add_format({"num_format": "0"})
+
+        ringkasan_ws = writer.sheets["Ringkasan"]
+        ringkasan_ws.set_column("A:A", 20)
+        ringkasan_ws.set_column("B:B", 18)
+        ringkasan_ws.set_column("C:C", 18)
+        ringkasan_ws.set_column("D:F", 20, money_fmt)
+        ringkasan_ws.set_column("G:G", 20, int_fmt)
+
         for asset_code, schedule in schedules.items():
             schedule_df = pd.DataFrame(schedule)
+            sheet_name = safe_sheet_name(asset_code)
 
-            valid_sheet_name = (
-                str(asset_code)[:31]
-                .replace("/", "_")
-                .replace("\\", "_")
-                .replace(":", "_")
-                .replace("*", "_")
-                .replace("?", "_")
-                .replace("[", "_")
-                .replace("]", "_")
-            )
+            schedule_df.to_excel(writer, sheet_name=sheet_name, startrow=2, index=False)
+            ws = writer.sheets[sheet_name]
 
-            schedule_df.to_excel(writer, sheet_name=valid_sheet_name, startrow=1, index=False)
+            ws.write(0, 0, "Kode Aset")
+            ws.write(0, 1, asset_code)
+            ws.write(1, 0, "Tanggal Pelaporan")
+            ws.write(1, 1, REPORTING_DATE.strftime("%d/%m/%Y"))
 
-            worksheet = writer.sheets[valid_sheet_name]
-            worksheet.write(0, 0, "Kode Aset")
-            worksheet.write(0, 1, asset_code)
+            ws.set_column("A:C", 16)
+            ws.set_column("D:G", 22, money_fmt)
+            ws.set_column("H:I", 22)
 
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def create_template_excel():
+    buffer = BytesIO()
+
+    df_assets = pd.DataFrame([
+        {
+            "Kode Aset": "AST-001",
+            "Harga Perolehan Awal (Rp)": 120000000,
+            "Tanggal Perolehan": "15/03/2024",
+            "Masa Manfaat (tahun)": 10
+        }
+    ])
+
+    df_caps = pd.DataFrame([
+        {
+            "Kode Aset": "AST-001",
+            "Tanggal Kapitalisasi": "10/08/2025",
+            "Jumlah": 15000000,
+            "Tambahan Usia": 4
+        }
+    ])
+
+    df_corrs = pd.DataFrame([
+        {
+            "Kode Aset": "AST-001",
+            "Tanggal Koreksi": "05/10/2025",
+            "Jumlah": 2000000
+        }
+    ])
+
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        df_assets.to_excel(writer, index=False, sheet_name="Data Aset")
+        df_caps.to_excel(writer, index=False, sheet_name="Kapitalisasi")
+        df_corrs.to_excel(writer, index=False, sheet_name="Koreksi")
+
+        workbook = writer.book
+        date_fmt = workbook.add_format({"num_format": "dd/mm/yyyy"})
+        money_fmt = workbook.add_format({"num_format": "#,##0.00"})
+
+        ws1 = writer.sheets["Data Aset"]
+        ws2 = writer.sheets["Kapitalisasi"]
+        ws3 = writer.sheets["Koreksi"]
+
+        ws1.set_column("A:A", 18)
+        ws1.set_column("B:B", 24, money_fmt)
+        ws1.set_column("C:C", 18, date_fmt)
+        ws1.set_column("D:D", 18)
+
+        ws2.set_column("A:A", 18)
+        ws2.set_column("B:B", 18, date_fmt)
+        ws2.set_column("C:C", 20, money_fmt)
+        ws2.set_column("D:D", 18)
+
+        ws3.set_column("A:A", 18)
+        ws3.set_column("B:B", 18, date_fmt)
+        ws3.set_column("C:C", 20, money_fmt)
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def normalize_text_column(df, col_name):
+    if col_name not in df.columns:
+        return df
+    df[col_name] = df[col_name].astype(str).str.strip()
+    df.loc[df[col_name].isin(["", "nan", "None"]), col_name] = pd.NA
+    return df
 
 
 def app():
@@ -197,22 +257,50 @@ def app():
         - Kode Aset
         - Tanggal Koreksi
         - Jumlah
+
+        **Catatan**
+        - Sheet Kapitalisasi dan Koreksi boleh kosong.
+        - Tambahan Usia diisi dalam tahun. Contoh 4 = 48 bulan.
+        - Tambahan usia maksimal sampai masa manfaat awal/induk.
         """)
 
     st.subheader("📥 Download Template Excel")
-    if st.button("⬇️ Download Template Excel"):
-        st.info("Template mengikuti format kolom yang dijelaskan di atas.")
+    template_file = create_template_excel()
+    st.download_button(
+        "⬇️ Download Template Excel",
+        template_file,
+        "template_penyusutan_bulanan_2025.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
     uploaded_file = st.file_uploader("📤 Unggah File Excel", type=["xlsx"])
 
     if uploaded_file is not None:
         try:
-            # Penting: baca xlsx pakai openpyxl
             excel_data = pd.ExcelFile(uploaded_file, engine="openpyxl")
+            sheet_names = excel_data.sheet_names
+
+            if len(sheet_names) < 1:
+                st.error("File Excel tidak memiliki sheet yang dapat dibaca.")
+                return
 
             assets_df = excel_data.parse(sheet_name=0)
-            capitalizations_df = excel_data.parse(sheet_name=1)
-            corrections_df = excel_data.parse(sheet_name=2)
+
+            # Sheet 2 boleh kosong / tidak ada
+            if len(sheet_names) >= 2:
+                capitalizations_df = excel_data.parse(sheet_name=1)
+            else:
+                capitalizations_df = pd.DataFrame(columns=[
+                    "Kode Aset", "Tanggal Kapitalisasi", "Jumlah", "Tambahan Usia"
+                ])
+
+            # Sheet 3 boleh kosong / tidak ada
+            if len(sheet_names) >= 3:
+                corrections_df = excel_data.parse(sheet_name=2)
+            else:
+                corrections_df = pd.DataFrame(columns=[
+                    "Kode Aset", "Tanggal Koreksi", "Jumlah"
+                ])
 
             required_assets = {
                 "Kode Aset",
@@ -220,36 +308,46 @@ def app():
                 "Tanggal Perolehan",
                 "Masa Manfaat (tahun)"
             }
-            required_caps = {
-                "Kode Aset",
-                "Tanggal Kapitalisasi",
-                "Jumlah",
-                "Tambahan Usia"
-            }
-            required_corrs = {
-                "Kode Aset",
-                "Tanggal Koreksi",
-                "Jumlah"
-            }
 
             if not required_assets.issubset(assets_df.columns):
                 st.error("Kolom di Sheet 1 tidak valid. Wajib: Kode Aset, Harga Perolehan Awal (Rp), Tanggal Perolehan, Masa Manfaat (tahun).")
                 return
 
-            if not required_caps.issubset(capitalizations_df.columns):
-                st.error("Kolom di Sheet 2 tidak valid. Wajib: Kode Aset, Tanggal Kapitalisasi, Jumlah, Tambahan Usia.")
-                return
+            # Kalau sheet kapitalisasi ada isinya, baru validasi
+            if not capitalizations_df.empty:
+                required_caps = {
+                    "Kode Aset",
+                    "Tanggal Kapitalisasi",
+                    "Jumlah",
+                    "Tambahan Usia"
+                }
+                if not required_caps.issubset(capitalizations_df.columns):
+                    st.error("Kolom di Sheet 2 tidak valid. Wajib: Kode Aset, Tanggal Kapitalisasi, Jumlah, Tambahan Usia.")
+                    return
+            else:
+                capitalizations_df = pd.DataFrame(columns=[
+                    "Kode Aset", "Tanggal Kapitalisasi", "Jumlah", "Tambahan Usia"
+                ])
 
-            if not required_corrs.issubset(corrections_df.columns):
-                st.error("Kolom di Sheet 3 tidak valid. Wajib: Kode Aset, Tanggal Koreksi, Jumlah.")
-                return
+            # Kalau sheet koreksi ada isinya, baru validasi
+            if not corrections_df.empty:
+                required_corrs = {
+                    "Kode Aset",
+                    "Tanggal Koreksi",
+                    "Jumlah"
+                }
+                if not required_corrs.issubset(corrections_df.columns):
+                    st.error("Kolom di Sheet 3 tidak valid. Wajib: Kode Aset, Tanggal Koreksi, Jumlah.")
+                    return
+            else:
+                corrections_df = pd.DataFrame(columns=[
+                    "Kode Aset", "Tanggal Koreksi", "Jumlah"
+                ])
 
-            # Normalisasi teks
-            assets_df["Kode Aset"] = assets_df["Kode Aset"].astype(str).str.strip()
-            capitalizations_df["Kode Aset"] = capitalizations_df["Kode Aset"].astype(str).str.strip()
-            corrections_df["Kode Aset"] = corrections_df["Kode Aset"].astype(str).str.strip()
+            assets_df = normalize_text_column(assets_df, "Kode Aset")
+            capitalizations_df = normalize_text_column(capitalizations_df, "Kode Aset")
+            corrections_df = normalize_text_column(corrections_df, "Kode Aset")
 
-            # Konversi numerik
             assets_df["Harga Perolehan Awal (Rp)"] = pd.to_numeric(
                 assets_df["Harga Perolehan Awal (Rp)"], errors="coerce"
             )
@@ -257,30 +355,47 @@ def app():
                 assets_df["Masa Manfaat (tahun)"], errors="coerce"
             )
 
-            capitalizations_df["Jumlah"] = pd.to_numeric(
-                capitalizations_df["Jumlah"], errors="coerce"
-            )
-            capitalizations_df["Tambahan Usia"] = pd.to_numeric(
-                capitalizations_df["Tambahan Usia"], errors="coerce"
-            )
+            if not capitalizations_df.empty:
+                capitalizations_df["Jumlah"] = pd.to_numeric(
+                    capitalizations_df["Jumlah"], errors="coerce"
+                )
+                capitalizations_df["Tambahan Usia"] = pd.to_numeric(
+                    capitalizations_df["Tambahan Usia"], errors="coerce"
+                )
 
-            corrections_df["Jumlah"] = pd.to_numeric(
-                corrections_df["Jumlah"], errors="coerce"
-            )
+            if not corrections_df.empty:
+                corrections_df["Jumlah"] = pd.to_numeric(
+                    corrections_df["Jumlah"], errors="coerce"
+                )
 
-            # Konversi tanggal
             assets_df["Tanggal Perolehan"] = pd.to_datetime(
                 assets_df["Tanggal Perolehan"], errors="coerce", dayfirst=True
             )
-            capitalizations_df["Tanggal Kapitalisasi"] = pd.to_datetime(
-                capitalizations_df["Tanggal Kapitalisasi"], errors="coerce", dayfirst=True
-            )
-            corrections_df["Tanggal Koreksi"] = pd.to_datetime(
-                corrections_df["Tanggal Koreksi"], errors="coerce", dayfirst=True
-            )
+
+            if not capitalizations_df.empty:
+                capitalizations_df["Tanggal Kapitalisasi"] = pd.to_datetime(
+                    capitalizations_df["Tanggal Kapitalisasi"], errors="coerce", dayfirst=True
+                )
+
+            if not corrections_df.empty:
+                corrections_df["Tanggal Koreksi"] = pd.to_datetime(
+                    corrections_df["Tanggal Koreksi"], errors="coerce", dayfirst=True
+                )
+
+            # Validasi duplikat Kode Aset di sheet aset
+            aset_valid = assets_df.dropna(subset=["Kode Aset"])
+            duplicated_codes = aset_valid[aset_valid["Kode Aset"].duplicated()]["Kode Aset"].unique().tolist()
+
+            if duplicated_codes:
+                st.error(
+                    "Terdapat duplikat Kode Aset pada Sheet 1: " +
+                    ", ".join(map(str, duplicated_codes))
+                )
+                return
 
             results = []
-            schedules = {}
+            schedules = []
+            schedules_dict = {}
 
             for _, asset in assets_df.iterrows():
                 if (
@@ -296,17 +411,31 @@ def app():
                 acquisition_date = asset["Tanggal Perolehan"]
                 useful_life = float(asset["Masa Manfaat (tahun)"])
 
+                if initial_cost < 0:
+                    st.warning(f"Kode Aset '{asset_code}' dilewati karena harga perolehan negatif.")
+                    continue
+
+                if useful_life <= 0:
+                    st.warning(f"Kode Aset '{asset_code}' dilewati karena masa manfaat harus lebih dari 0.")
+                    continue
+
                 if acquisition_date > REPORTING_DATE:
                     st.warning(f"Kode Aset '{asset_code}' dilewati karena tanggal perolehan setelah 31/12/2025.")
                     continue
 
-                asset_caps = capitalizations_df[
-                    capitalizations_df["Kode Aset"] == asset_code
-                ].to_dict("records")
+                if not capitalizations_df.empty:
+                    asset_caps = capitalizations_df[
+                        capitalizations_df["Kode Aset"] == asset_code
+                    ].to_dict("records")
+                else:
+                    asset_caps = []
 
-                asset_corrs = corrections_df[
-                    corrections_df["Kode Aset"] == asset_code
-                ].to_dict("records")
+                if not corrections_df.empty:
+                    asset_corrs = corrections_df[
+                        corrections_df["Kode Aset"] == asset_code
+                    ].to_dict("records")
+                else:
+                    asset_corrs = []
 
                 schedule = calculate_depreciation_monthly(
                     initial_cost=initial_cost,
@@ -328,7 +457,7 @@ def app():
                         "Nilai Buku Akhir": last_row["Nilai Buku Akhir"],
                         "Sisa Masa Manfaat (Bulan)": last_row["Sisa Masa Manfaat (Bulan)"],
                     })
-                    schedules[asset_code] = schedule
+                    schedules_dict[asset_code] = schedule
 
             results_df = pd.DataFrame(results)
 
@@ -343,7 +472,7 @@ def app():
                     use_container_width=True
                 )
 
-                excel_buffer = convert_df_to_excel_with_sheets(results, schedules)
+                excel_buffer = convert_df_to_excel_with_sheets(results, schedules_dict)
 
                 st.download_button(
                     "📥 Download Hasil",
