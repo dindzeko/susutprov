@@ -5,6 +5,68 @@ from io import BytesIO
 REPORTING_DATE = pd.Timestamp("2025-12-31")
 
 
+def parse_mixed_excel_date(value):
+    """
+    Menangani:
+    - datetime/Timestamp
+    - teks tanggal biasa: 14-08-2017, 14/08/2017, 2017-08-14
+    - serial date Excel: 42735
+    - string dengan spasi tersembunyi
+    """
+    if pd.isna(value):
+        return pd.NaT
+
+    if isinstance(value, pd.Timestamp):
+        return value
+
+    text = str(value).strip().replace("\xa0", "").replace("  ", " ")
+
+    if text == "" or text.lower() in ["nan", "none", "nat"]:
+        return pd.NaT
+
+    try:
+        num = float(text)
+        if num > 1000:
+            return pd.Timestamp("1899-12-30") + pd.to_timedelta(num, unit="D")
+    except Exception:
+        pass
+
+    return pd.to_datetime(text, errors="coerce", dayfirst=True)
+
+
+def normalize_kode_aset(value):
+    """
+    Menyamakan:
+    211506
+    211506.0
+    ' 211506 '
+    menjadi '211506'
+    """
+    if pd.isna(value):
+        return pd.NA
+
+    text = str(value).strip().replace("\xa0", "")
+
+    if text == "" or text.lower() in ["nan", "none"]:
+        return pd.NA
+
+    try:
+        num = float(text)
+        if num.is_integer():
+            return str(int(num))
+    except Exception:
+        pass
+
+    return text
+
+
+def safe_sheet_name(name):
+    text = str(name)
+    for ch in ["/", "\\", ":", "*", "?", "[", "]"]:
+        text = text.replace(ch, "_")
+    return text[:31] if text else "Sheet"
+
+
 def calculate_depreciation_monthly(
     initial_cost,
     acquisition_date,
@@ -13,13 +75,21 @@ def calculate_depreciation_monthly(
     capitalizations=None,
     corrections=None
 ):
+    """
+    Logika:
+    - Penyusutan mulai pada bulan perolehan
+    - Kapitalisasi diproses pada bulan kapitalisasi
+    - Koreksi diproses pada bulan koreksi
+    - Tambahan usia diinput dalam TAHUN -> dikali 12 jadi BULAN
+    - Sisa masa manfaat maksimum = masa manfaat awal/induk
+    """
     if capitalizations is None:
         capitalizations = []
     if corrections is None:
         corrections = []
 
-    acquisition_date = pd.to_datetime(acquisition_date, errors="coerce", dayfirst=True)
-    reporting_date = pd.to_datetime(reporting_date, errors="coerce")
+    acquisition_date = parse_mixed_excel_date(acquisition_date)
+    reporting_date = parse_mixed_excel_date(reporting_date)
 
     if pd.isna(acquisition_date) or pd.isna(reporting_date):
         return []
@@ -35,14 +105,14 @@ def calculate_depreciation_monthly(
 
     cap_dict = {}
     for cap in capitalizations:
-        cap_date = pd.to_datetime(cap.get("Tanggal Kapitalisasi"), errors="coerce", dayfirst=True)
+        cap_date = parse_mixed_excel_date(cap.get("Tanggal Kapitalisasi"))
         if pd.notna(cap_date) and cap_date <= reporting_date:
             key = (cap_date.year, cap_date.month)
             cap_dict.setdefault(key, []).append(cap)
 
     corr_dict = {}
     for corr in corrections:
-        corr_date = pd.to_datetime(corr.get("Tanggal Koreksi"), errors="coerce", dayfirst=True)
+        corr_date = parse_mixed_excel_date(corr.get("Tanggal Koreksi"))
         if pd.notna(corr_date) and corr_date <= reporting_date:
             key = (corr_date.year, corr_date.month)
             corr_dict.setdefault(key, []).append(corr)
@@ -72,7 +142,6 @@ def calculate_depreciation_monthly(
 
             book_value += kapitalisasi_bulan_ini
 
-            # Maksimal tidak boleh melebihi masa manfaat awal/induk
             remaining_life_months = min(
                 remaining_life_months + tambahan_usia_bulan_ini,
                 original_life_months
@@ -114,31 +183,26 @@ def calculate_depreciation_monthly(
     return schedule
 
 
-def safe_sheet_name(name):
-    text = str(name)
-    for ch in ["/", "\\", ":", "*", "?", "[", "]"]:
-        text = text.replace(ch, "_")
-    return text[:31] if text else "Sheet"
-
-
-def convert_df_to_excel_with_sheets(results, schedules):
+def convert_df_to_excel_with_sheets(results, schedules, skipped_rows=None, total_rows=0):
     buffer = BytesIO()
 
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        results_df = pd.DataFrame(results)
-        results_df.to_excel(writer, index=False, sheet_name="Ringkasan")
-
         workbook = writer.book
         money_fmt = workbook.add_format({"num_format": "#,##0.00"})
         int_fmt = workbook.add_format({"num_format": "0"})
+        bold_fmt = workbook.add_format({"bold": True})
 
-        ringkasan_ws = writer.sheets["Ringkasan"]
-        ringkasan_ws.set_column("A:A", 20)
-        ringkasan_ws.set_column("B:B", 18)
-        ringkasan_ws.set_column("C:C", 18)
-        ringkasan_ws.set_column("D:F", 20, money_fmt)
-        ringkasan_ws.set_column("G:G", 20, int_fmt)
+        # Sheet Ringkasan
+        results_df = pd.DataFrame(results)
+        results_df.to_excel(writer, index=False, sheet_name="Ringkasan")
 
+        ws_ringkasan = writer.sheets["Ringkasan"]
+        ws_ringkasan.set_column("A:A", 20)
+        ws_ringkasan.set_column("B:C", 18)
+        ws_ringkasan.set_column("D:F", 22, money_fmt)
+        ws_ringkasan.set_column("G:G", 20, int_fmt)
+
+        # Sheet detail per aset
         for asset_code, schedule in schedules.items():
             schedule_df = pd.DataFrame(schedule)
             sheet_name = safe_sheet_name(asset_code)
@@ -146,14 +210,41 @@ def convert_df_to_excel_with_sheets(results, schedules):
             schedule_df.to_excel(writer, sheet_name=sheet_name, startrow=2, index=False)
             ws = writer.sheets[sheet_name]
 
-            ws.write(0, 0, "Kode Aset")
+            ws.write(0, 0, "Kode Aset", bold_fmt)
             ws.write(0, 1, asset_code)
-            ws.write(1, 0, "Tanggal Pelaporan")
+            ws.write(1, 0, "Tanggal Pelaporan", bold_fmt)
             ws.write(1, 1, REPORTING_DATE.strftime("%d/%m/%Y"))
 
-            ws.set_column("A:C", 16)
+            ws.set_column("A:C", 18)
             ws.set_column("D:G", 22, money_fmt)
-            ws.set_column("H:I", 22)
+            ws.set_column("H:I", 22, int_fmt)
+
+        # Sheet Reviu Hasil
+        ws_reviu = workbook.add_worksheet("Reviu Hasil")
+        writer.sheets["Reviu Hasil"] = ws_reviu
+
+        processed_rows = len(results)
+        skipped_count = len(skipped_rows) if skipped_rows else 0
+
+        ws_reviu.write(0, 0, "Ringkasan Reviu", bold_fmt)
+        ws_reviu.write(2, 0, "Jumlah total baris", bold_fmt)
+        ws_reviu.write(2, 1, total_rows, int_fmt)
+
+        ws_reviu.write(3, 0, "Jumlah baris berhasil diproses", bold_fmt)
+        ws_reviu.write(3, 1, processed_rows, int_fmt)
+
+        ws_reviu.write(4, 0, "Jumlah baris dilewati", bold_fmt)
+        ws_reviu.write(4, 1, skipped_count, int_fmt)
+
+        start_row = 7
+        ws_reviu.write(start_row, 0, "Daftar Baris yang Dilewati", bold_fmt)
+
+        skipped_df = pd.DataFrame(skipped_rows if skipped_rows else [], columns=["Baris Excel", "Kode Aset", "Alasan"])
+        skipped_df.to_excel(writer, index=False, sheet_name="Reviu Hasil", startrow=start_row + 1)
+
+        ws_reviu.set_column("A:A", 15)
+        ws_reviu.set_column("B:B", 20)
+        ws_reviu.set_column("C:C", 60)
 
     buffer.seek(0)
     return buffer.getvalue()
@@ -164,25 +255,25 @@ def create_template_excel():
 
     df_assets = pd.DataFrame([
         {
-            "Kode Aset": "AST-001",
-            "Harga Perolehan Awal (Rp)": 120000000,
-            "Tanggal Perolehan": "15/03/2024",
-            "Masa Manfaat (tahun)": 10
+            "Kode Aset": "211506",
+            "Harga Perolehan Awal (Rp)": 401150000,
+            "Tanggal Perolehan": "14/08/2017",
+            "Masa Manfaat (tahun)": 8
         }
     ])
 
     df_caps = pd.DataFrame([
         {
-            "Kode Aset": "AST-001",
-            "Tanggal Kapitalisasi": "10/08/2025",
-            "Jumlah": 15000000,
+            "Kode Aset": "211506",
+            "Tanggal Kapitalisasi": "12/12/2017",
+            "Jumlah": 206990000,
             "Tambahan Usia": 4
         }
     ])
 
     df_corrs = pd.DataFrame([
         {
-            "Kode Aset": "AST-001",
+            "Kode Aset": "211506",
             "Tanggal Koreksi": "05/10/2025",
             "Jumlah": 2000000
         }
@@ -219,14 +310,6 @@ def create_template_excel():
     return buffer.getvalue()
 
 
-def normalize_text_column(df, col_name):
-    if col_name not in df.columns:
-        return df
-    df[col_name] = df[col_name].astype(str).str.strip()
-    df.loc[df[col_name].isin(["", "nan", "None"]), col_name] = pd.NA
-    return df
-
-
 def app():
     st.title("📉 Depresiasi GL Bulanan")
 
@@ -240,7 +323,7 @@ def app():
         **Tanggal pelaporan otomatis: 31 Desember 2025**
 
         **Format Excel**
-        
+
         **Sheet 1 - Data Aset**
         - Kode Aset
         - Harga Perolehan Awal (Rp)
@@ -286,7 +369,6 @@ def app():
 
             assets_df = excel_data.parse(sheet_name=0)
 
-            # Sheet 2 boleh kosong / tidak ada
             if len(sheet_names) >= 2:
                 capitalizations_df = excel_data.parse(sheet_name=1)
             else:
@@ -294,7 +376,6 @@ def app():
                     "Kode Aset", "Tanggal Kapitalisasi", "Jumlah", "Tambahan Usia"
                 ])
 
-            # Sheet 3 boleh kosong / tidak ada
             if len(sheet_names) >= 3:
                 corrections_df = excel_data.parse(sheet_name=2)
             else:
@@ -313,7 +394,6 @@ def app():
                 st.error("Kolom di Sheet 1 tidak valid. Wajib: Kode Aset, Harga Perolehan Awal (Rp), Tanggal Perolehan, Masa Manfaat (tahun).")
                 return
 
-            # Kalau sheet kapitalisasi ada isinya, baru validasi
             if not capitalizations_df.empty:
                 required_caps = {
                     "Kode Aset",
@@ -329,7 +409,6 @@ def app():
                     "Kode Aset", "Tanggal Kapitalisasi", "Jumlah", "Tambahan Usia"
                 ])
 
-            # Kalau sheet koreksi ada isinya, baru validasi
             if not corrections_df.empty:
                 required_corrs = {
                     "Kode Aset",
@@ -344,9 +423,9 @@ def app():
                     "Kode Aset", "Tanggal Koreksi", "Jumlah"
                 ])
 
-            assets_df = normalize_text_column(assets_df, "Kode Aset")
-            capitalizations_df = normalize_text_column(capitalizations_df, "Kode Aset")
-            corrections_df = normalize_text_column(corrections_df, "Kode Aset")
+            assets_df["Kode Aset"] = assets_df["Kode Aset"].apply(normalize_kode_aset)
+            capitalizations_df["Kode Aset"] = capitalizations_df["Kode Aset"].apply(normalize_kode_aset)
+            corrections_df["Kode Aset"] = corrections_df["Kode Aset"].apply(normalize_kode_aset)
 
             assets_df["Harga Perolehan Awal (Rp)"] = pd.to_numeric(
                 assets_df["Harga Perolehan Awal (Rp)"], errors="coerce"
@@ -368,42 +447,44 @@ def app():
                     corrections_df["Jumlah"], errors="coerce"
                 )
 
-            assets_df["Tanggal Perolehan"] = pd.to_datetime(
-                assets_df["Tanggal Perolehan"], errors="coerce", dayfirst=True
-            )
+            assets_df["Tanggal Perolehan"] = assets_df["Tanggal Perolehan"].apply(parse_mixed_excel_date)
 
             if not capitalizations_df.empty:
-                capitalizations_df["Tanggal Kapitalisasi"] = pd.to_datetime(
-                    capitalizations_df["Tanggal Kapitalisasi"], errors="coerce", dayfirst=True
-                )
+                capitalizations_df["Tanggal Kapitalisasi"] = capitalizations_df["Tanggal Kapitalisasi"].apply(parse_mixed_excel_date)
 
             if not corrections_df.empty:
-                corrections_df["Tanggal Koreksi"] = pd.to_datetime(
-                    corrections_df["Tanggal Koreksi"], errors="coerce", dayfirst=True
-                )
+                corrections_df["Tanggal Koreksi"] = corrections_df["Tanggal Koreksi"].apply(parse_mixed_excel_date)
 
-            # Validasi duplikat Kode Aset di sheet aset
             aset_valid = assets_df.dropna(subset=["Kode Aset"])
             duplicated_codes = aset_valid[aset_valid["Kode Aset"].duplicated()]["Kode Aset"].unique().tolist()
 
             if duplicated_codes:
-                st.error(
-                    "Terdapat duplikat Kode Aset pada Sheet 1: " +
-                    ", ".join(map(str, duplicated_codes))
-                )
+                st.error("Terdapat duplikat Kode Aset pada Sheet 1: " + ", ".join(map(str, duplicated_codes)))
                 return
 
+            skipped_rows = []
             results = []
-            schedules = []
             schedules_dict = {}
+            total_rows = len(assets_df)
 
-            for _, asset in assets_df.iterrows():
-                if (
-                    pd.isna(asset["Kode Aset"]) or
-                    pd.isna(asset["Harga Perolehan Awal (Rp)"]) or
-                    pd.isna(asset["Tanggal Perolehan"]) or
-                    pd.isna(asset["Masa Manfaat (tahun)"])
-                ):
+            for idx, asset in assets_df.iterrows():
+                alasan = []
+
+                if pd.isna(asset["Kode Aset"]):
+                    alasan.append("Kode Aset kosong/tidak valid")
+                if pd.isna(asset["Harga Perolehan Awal (Rp)"]):
+                    alasan.append("Harga Perolehan kosong/tidak valid")
+                if pd.isna(asset["Tanggal Perolehan"]):
+                    alasan.append("Tanggal Perolehan kosong/tidak valid")
+                if pd.isna(asset["Masa Manfaat (tahun)"]):
+                    alasan.append("Masa Manfaat kosong/tidak valid")
+
+                if alasan:
+                    skipped_rows.append({
+                        "Baris Excel": idx + 2,
+                        "Kode Aset": asset.get("Kode Aset", ""),
+                        "Alasan": "; ".join(alasan)
+                    })
                     continue
 
                 asset_code = str(asset["Kode Aset"]).strip()
@@ -412,15 +493,27 @@ def app():
                 useful_life = float(asset["Masa Manfaat (tahun)"])
 
                 if initial_cost < 0:
-                    st.warning(f"Kode Aset '{asset_code}' dilewati karena harga perolehan negatif.")
+                    skipped_rows.append({
+                        "Baris Excel": idx + 2,
+                        "Kode Aset": asset_code,
+                        "Alasan": "Harga Perolehan negatif"
+                    })
                     continue
 
                 if useful_life <= 0:
-                    st.warning(f"Kode Aset '{asset_code}' dilewati karena masa manfaat harus lebih dari 0.")
+                    skipped_rows.append({
+                        "Baris Excel": idx + 2,
+                        "Kode Aset": asset_code,
+                        "Alasan": "Masa Manfaat harus lebih dari 0"
+                    })
                     continue
 
                 if acquisition_date > REPORTING_DATE:
-                    st.warning(f"Kode Aset '{asset_code}' dilewati karena tanggal perolehan setelah 31/12/2025.")
+                    skipped_rows.append({
+                        "Baris Excel": idx + 2,
+                        "Kode Aset": asset_code,
+                        "Alasan": "Tanggal Perolehan setelah 31/12/2025"
+                    })
                     continue
 
                 if not capitalizations_df.empty:
@@ -459,6 +552,12 @@ def app():
                     })
                     schedules_dict[asset_code] = schedule
 
+            st.info(
+                f"Total baris aset: {total_rows} | "
+                f"Berhasil diproses: {len(results)} | "
+                f"Dilewati: {len(skipped_rows)}"
+            )
+
             results_df = pd.DataFrame(results)
 
             if not results_df.empty:
@@ -472,7 +571,16 @@ def app():
                     use_container_width=True
                 )
 
-                excel_buffer = convert_df_to_excel_with_sheets(results, schedules_dict)
+                if skipped_rows:
+                    st.warning(f"Ada {len(skipped_rows)} baris yang dilewati.")
+                    st.dataframe(pd.DataFrame(skipped_rows), use_container_width=True)
+
+                excel_buffer = convert_df_to_excel_with_sheets(
+                    results,
+                    schedules_dict,
+                    skipped_rows=skipped_rows,
+                    total_rows=total_rows
+                )
 
                 st.download_button(
                     "📥 Download Hasil",
