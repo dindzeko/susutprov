@@ -10,26 +10,47 @@ def inject_custom_css():
     st.markdown("""
     <style>
         .main > div {
-            padding-top: 1rem;
+            padding-top: 0.5rem;
         }
 
         .block-container {
-            padding-top: 1.2rem;
+            padding-top: 2rem;
             padding-bottom: 2rem;
             padding-left: 1.5rem;
             padding-right: 1.5rem;
         }
 
-        .custom-title {
+        .title-wrap {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 0.2rem;
+            margin-bottom: 0.4rem;
+            overflow: visible;
+        }
+
+        .title-icon {
+            font-size: 2rem;
+            line-height: 1.3;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding-top: 2px;
+        }
+
+        .title-text {
             font-size: 2rem;
             font-weight: 700;
-            margin-bottom: 0.2rem;
+            line-height: 1.3;
+            margin: 0;
+            padding: 0;
         }
 
         .custom-subtitle {
             color: #666;
             font-size: 0.95rem;
             margin-bottom: 1rem;
+            line-height: 1.5;
         }
 
         .info-box {
@@ -415,11 +436,15 @@ def app():
 
     inject_custom_css()
 
-    st.markdown('<div class="custom-title">📉 Depresiasi GL Bulanan</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="custom-subtitle">Perhitungan penyusutan bulanan dengan tanggal pelaporan otomatis 31 Desember 2025.</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown("""
+    <div class="title-wrap">
+        <div class="title-icon">📉</div>
+        <div class="title-text">Depresiasi GL Bulanan</div>
+    </div>
+    <div class="custom-subtitle">
+        Perhitungan penyusutan bulanan dengan tanggal pelaporan otomatis 31 Desember 2025.
+    </div>
+    """, unsafe_allow_html=True)
 
     with st.sidebar:
         st.header("⚙️ Panel Aplikasi")
@@ -483,6 +508,7 @@ def app():
         - Sheet kapitalisasi dan koreksi boleh kosong.
         - Kapitalisasi/koreksi sebelum tanggal perolehan induk akan dicatat sebagai **anomali**.
         - Tambahan usia maksimal sampai masa manfaat awal/induk.
+        - Kolom ringkasan memakai **Beban Penyusutan 2025**, bukan hanya bulan Desember.
         """)
 
     if uploaded_file is None:
@@ -702,11 +728,17 @@ def app():
 
             if schedule:
                 last_row = schedule[-1]
+                schedule_df = pd.DataFrame(schedule)
+
+                beban_penyusutan_2025 = schedule_df.loc[
+                    schedule_df["Tahun"] == 2025, "Penyusutan Bulan Berjalan"
+                ].sum()
+
                 results.append({
                     "Kode Aset": asset_code,
                     "Tanggal Pelaporan": REPORTING_DATE.strftime("%d/%m/%Y"),
                     "Periode Pelaporan": last_row["Periode"],
-                    "Penyusutan Bulan Berjalan": last_row["Penyusutan Bulan Berjalan"],
+                    "Beban Penyusutan 2025": round(beban_penyusutan_2025, 2),
                     "Akumulasi Penyusutan": last_row["Akumulasi Penyusutan"],
                     "Nilai Buku Akhir": last_row["Nilai Buku Akhir"],
                     "Sisa Masa Manfaat (Bulan)": last_row["Sisa Masa Manfaat (Bulan)"],
@@ -769,7 +801,7 @@ def app():
             if not filtered_results_df.empty:
                 st.dataframe(
                     filtered_results_df.style.format({
-                        "Penyusutan Bulan Berjalan": "{:,.2f}",
+                        "Beban Penyusutan 2025": "{:,.2f}",
                         "Akumulasi Penyusutan": "{:,.2f}",
                         "Nilai Buku Akhir": "{:,.2f}",
                         "Sisa Masa Manfaat (Bulan)": "{:,.0f}",
