@@ -66,6 +66,17 @@ def inject_custom_css():
             margin-bottom: 12px;
         }
 
+        .upload-note {
+            background-color: #eff6ff;
+            border: 1px solid #bfdbfe;
+            color: #1e3a8a;
+            padding: 12px 14px;
+            border-radius: 12px;
+            margin-bottom: 12px;
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
         .status-card {
             border-radius: 14px;
             padding: 14px 16px;
@@ -105,17 +116,6 @@ def inject_custom_css():
         .stDownloadButton button, .stButton button {
             border-radius: 10px !important;
             font-weight: 600 !important;
-        }
-
-        .upload-note {
-            background-color: #eff6ff;
-            border: 1px solid #bfdbfe;
-            color: #1e3a8a;
-            padding: 12px 14px;
-            border-radius: 12px;
-            margin-bottom: 12px;
-            font-size: 0.92rem;
-            line-height: 1.5;
         }
 
         .search-box-note {
@@ -186,6 +186,20 @@ def normalize_kode_aset(value):
         pass
 
     return text
+
+
+def safe_sheet_name(name):
+    text = str(name)
+
+    for ch in ["/", "\\", ":", "*", "?", "[", "]"]:
+        text = text.replace(ch, "_")
+
+    text = text.strip()
+
+    if not text:
+        text = "Sheet"
+
+    return text[:31]
 
 
 def get_empty_capitalization_df():
@@ -298,7 +312,7 @@ def load_excel_from_bytes(file_bytes):
 
 
 # =========================================================
-# VALIDASI DATA
+# VALIDASI DAN NORMALISASI DATA
 # =========================================================
 
 def prepare_input_data(assets_df, capitalizations_df, corrections_df):
@@ -324,6 +338,7 @@ def prepare_input_data(assets_df, capitalizations_df, corrections_df):
             "Jumlah",
             "Tambahan Usia"
         }
+
         if not required_caps.issubset(capitalizations_df.columns):
             raise ValueError(
                 "Kolom di Sheet 2 tidak valid. Wajib: "
@@ -338,6 +353,7 @@ def prepare_input_data(assets_df, capitalizations_df, corrections_df):
             "Tanggal Koreksi",
             "Jumlah"
         }
+
         if not required_corrs.issubset(corrections_df.columns):
             raise ValueError(
                 "Kolom di Sheet 3 tidak valid. Wajib: "
@@ -353,21 +369,28 @@ def prepare_input_data(assets_df, capitalizations_df, corrections_df):
     corrections_df["Kode Aset"] = corrections_df["Kode Aset"].apply(normalize_kode_aset)
 
     assets_df["Harga Perolehan Awal (Rp)"] = pd.to_numeric(
-        assets_df["Harga Perolehan Awal (Rp)"], errors="coerce"
+        assets_df["Harga Perolehan Awal (Rp)"],
+        errors="coerce"
     )
+
     assets_df["Masa Manfaat (tahun)"] = pd.to_numeric(
-        assets_df["Masa Manfaat (tahun)"], errors="coerce"
+        assets_df["Masa Manfaat (tahun)"],
+        errors="coerce"
     )
 
     capitalizations_df["Jumlah"] = pd.to_numeric(
-        capitalizations_df["Jumlah"], errors="coerce"
+        capitalizations_df["Jumlah"],
+        errors="coerce"
     )
+
     capitalizations_df["Tambahan Usia"] = pd.to_numeric(
-        capitalizations_df["Tambahan Usia"], errors="coerce"
+        capitalizations_df["Tambahan Usia"],
+        errors="coerce"
     )
 
     corrections_df["Jumlah"] = pd.to_numeric(
-        corrections_df["Jumlah"], errors="coerce"
+        corrections_df["Jumlah"],
+        errors="coerce"
     )
 
     assets_df["Tanggal Perolehan"] = assets_df["Tanggal Perolehan"].apply(parse_mixed_excel_date)
@@ -418,21 +441,26 @@ def calculate_depreciation_monthly(
     accumulated_dep = 0.0
 
     cap_dict = {}
+
     for cap in capitalizations:
         cap_date = parse_mixed_excel_date(cap.get("Tanggal Kapitalisasi"))
+
         if pd.notna(cap_date) and cap_date <= reporting_date:
             key = (cap_date.year, cap_date.month)
             cap_dict.setdefault(key, []).append(cap)
 
     corr_dict = {}
+
     for corr in corrections:
         corr_date = parse_mixed_excel_date(corr.get("Tanggal Koreksi"))
+
         if pd.notna(corr_date) and corr_date <= reporting_date:
             key = (corr_date.year, corr_date.month)
             corr_dict.setdefault(key, []).append(corr)
 
     current_year = acquisition_date.year
     current_month = acquisition_date.month
+
     schedule = []
 
     while (current_year < reporting_date.year) or (
@@ -656,10 +684,10 @@ def process_depreciation_data(assets_df, capitalizations_df, corrections_df):
 
 
 # =========================================================
-# EXPORT EXCEL
+# EXPORT EXCEL FORMAT KKP: SHEET PER ASET
 # =========================================================
 
-def convert_df_to_excel_combined_detail(
+def convert_df_to_excel_with_sheets(
     results,
     schedules,
     skipped_rows=None,
@@ -680,16 +708,6 @@ def convert_df_to_excel_combined_detail(
         columns=["Kode Aset", "Jenis Anomali", "Tanggal Aset", "Tanggal Transaksi", "Keterangan"]
     )
 
-    detail_rows = []
-
-    for asset_code, schedule in schedules.items():
-        for row in schedule:
-            new_row = {"Kode Aset": asset_code}
-            new_row.update(row)
-            detail_rows.append(new_row)
-
-    detail_df = pd.DataFrame(detail_rows)
-
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         workbook = writer.book
 
@@ -702,29 +720,74 @@ def convert_df_to_excel_combined_detail(
             "border": 1
         })
 
+        # =====================================================
+        # SHEET RINGKASAN
+        # =====================================================
         results_df.to_excel(writer, index=False, sheet_name="Ringkasan")
 
         ws_ringkasan = writer.sheets["Ringkasan"]
+
         ws_ringkasan.set_column("A:A", 20)
         ws_ringkasan.set_column("B:C", 18)
         ws_ringkasan.set_column("D:F", 22, money_fmt)
-        ws_ringkasan.set_column("G:G", 22, int_fmt)
+        ws_ringkasan.set_column("G:G", 24, int_fmt)
 
         for col_num, value in enumerate(results_df.columns):
             ws_ringkasan.write(0, col_num, value, header_fmt)
 
-        if not detail_df.empty:
-            detail_df.to_excel(writer, index=False, sheet_name="Detail Penyusutan")
+        # =====================================================
+        # SHEET DETAIL PER ASET
+        # =====================================================
+        used_sheet_names = {"Ringkasan", "Reviu Hasil"}
 
-            ws_detail = writer.sheets["Detail Penyusutan"]
-            ws_detail.set_column("A:A", 20)
-            ws_detail.set_column("B:D", 14)
-            ws_detail.set_column("E:I", 22, money_fmt)
-            ws_detail.set_column("J:K", 22, int_fmt)
+        for asset_code, schedule in schedules.items():
+            schedule_df = pd.DataFrame(schedule)
 
-            for col_num, value in enumerate(detail_df.columns):
-                ws_detail.write(0, col_num, value, header_fmt)
+            base_sheet_name = safe_sheet_name(asset_code)
+            sheet_name = base_sheet_name
 
+            counter = 1
+
+            while sheet_name in used_sheet_names:
+                suffix = f"_{counter}"
+                sheet_name = safe_sheet_name(base_sheet_name[:31 - len(suffix)] + suffix)
+                counter += 1
+
+            used_sheet_names.add(sheet_name)
+
+            schedule_df.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                startrow=2,
+                index=False
+            )
+
+            ws = writer.sheets[sheet_name]
+
+            ws.write(0, 0, "Kode Aset", bold_fmt)
+            ws.write(0, 1, asset_code)
+
+            ws.write(1, 0, "Tanggal Pelaporan", bold_fmt)
+            ws.write(1, 1, REPORTING_DATE.strftime("%d/%m/%Y"))
+
+            for col_num, value in enumerate(schedule_df.columns):
+                ws.write(2, col_num, value, header_fmt)
+
+            ws.set_column("A:A", 12)
+            ws.set_column("B:B", 10)
+            ws.set_column("C:C", 14)
+            ws.set_column("D:D", 24, money_fmt)
+            ws.set_column("E:E", 24, int_fmt)
+            ws.set_column("F:F", 22, money_fmt)
+            ws.set_column("G:G", 24, money_fmt)
+            ws.set_column("H:H", 24, money_fmt)
+            ws.set_column("I:I", 22, money_fmt)
+            ws.set_column("J:J", 24, int_fmt)
+            ws.set_column("K:K", 24)
+
+        # =====================================================
+        # SHEET REVIU HASIL
+        # =====================================================
         ws_reviu = workbook.add_worksheet("Reviu Hasil")
         writer.sheets["Reviu Hasil"] = ws_reviu
 
@@ -747,7 +810,13 @@ def convert_df_to_excel_combined_detail(
         ws_reviu.write(5, 1, anomaly_count, int_fmt)
 
         start_row_skip = 8
-        ws_reviu.write(start_row_skip, 0, "Daftar Baris yang Dilewati", bold_fmt)
+
+        ws_reviu.write(
+            start_row_skip,
+            0,
+            "Daftar Baris yang Dilewati",
+            bold_fmt
+        )
 
         skipped_df.to_excel(
             writer,
@@ -758,7 +827,12 @@ def convert_df_to_excel_combined_detail(
 
         start_row_anom = start_row_skip + 3 + max(len(skipped_df), 1)
 
-        ws_reviu.write(start_row_anom, 0, "Daftar Input Aset Tidak Logis / Anomali", bold_fmt)
+        ws_reviu.write(
+            start_row_anom,
+            0,
+            "Daftar Input Aset Tidak Logis / Anomali",
+            bold_fmt
+        )
 
         anomaly_df.to_excel(
             writer,
@@ -791,6 +865,9 @@ def app():
 
     if "processed_results" not in st.session_state:
         st.session_state["processed_results"] = None
+
+    if "last_uploaded_name" not in st.session_state:
+        st.session_state["last_uploaded_name"] = None
 
     st.markdown("""
     <div class="title-wrap">
@@ -829,9 +906,10 @@ def app():
 
         st.markdown("""
         <div class="upload-note">
-        <b>Saran:</b><br>
-        Agar browser tidak hang, jangan klik browse dari folder Downloads yang berat.
-        Lebih aman: pindahkan file ke folder sederhana, lalu <b>drag & drop</b> file Excel ke kotak upload.
+        <b>Saran agar browser tidak hang:</b><br>
+        1. Jangan klik browse dari folder Downloads yang terlalu berat.<br>
+        2. Pindahkan file Excel ke folder sederhana terlebih dahulu.<br>
+        3. Lebih aman gunakan <b>drag & drop</b> file Excel langsung ke kotak upload.
         </div>
         """, unsafe_allow_html=True)
 
@@ -844,8 +922,13 @@ def app():
 
         if uploaded_file is not None:
             file_size_mb = uploaded_file.size / (1024 * 1024)
+
             st.success(f"File terpilih: {uploaded_file.name}")
             st.caption(f"Ukuran file: {file_size_mb:.2f} MB")
+
+            if st.session_state["last_uploaded_name"] != uploaded_file.name:
+                st.session_state["processed_results"] = None
+                st.session_state["last_uploaded_name"] = uploaded_file.name
 
             if file_size_mb > MAX_UPLOAD_MB:
                 st.warning(
@@ -888,7 +971,7 @@ def app():
         - Sheet kapitalisasi dan koreksi boleh kosong.
         - Kapitalisasi/koreksi sebelum tanggal perolehan induk akan dicatat sebagai anomali.
         - Tambahan usia diisi dalam tahun dan dikonversi ke bulan.
-        - Detail export dibuat dalam satu sheet gabungan agar lebih ringan.
+        - Format hasil Excel tetap untuk KKP: **Ringkasan + sheet masing-masing Kode Aset + Reviu Hasil**.
         """)
 
     if uploaded_file is None:
@@ -1092,7 +1175,9 @@ def app():
     with tab3:
         st.markdown("#### Detail Jadwal Penyusutan per Aset")
 
-        st.info("Untuk menjaga aplikasi tetap ringan, detail ditampilkan berdasarkan Kode Aset yang dipilih.")
+        st.info(
+            "Untuk menjaga aplikasi tetap ringan, detail ditampilkan berdasarkan Kode Aset yang dipilih."
+        )
 
         detail_options = list(schedules_dict.keys())
 
@@ -1142,7 +1227,14 @@ def app():
 
         st.warning(
             "File Excel hasil baru dibuat setelah tombol di bawah diklik. "
-            "Ini untuk mencegah aplikasi berat langsung setelah upload."
+            "Format export tetap menggunakan sheet masing-masing Kode Aset untuk kebutuhan KKP."
+        )
+
+        jumlah_sheet_detail = len(schedules_dict)
+
+        st.info(
+            f"Estimasi sheet detail aset yang akan dibuat: {jumlah_sheet_detail} sheet. "
+            "Jika jumlah aset sangat banyak, proses export bisa memerlukan waktu lebih lama."
         )
 
         export_clicked = st.button(
@@ -1151,8 +1243,8 @@ def app():
         )
 
         if export_clicked:
-            with st.spinner("Membuat file Excel hasil..."):
-                excel_buffer = convert_df_to_excel_combined_detail(
+            with st.spinner("Membuat file Excel hasil dengan sheet per Kode Aset..."):
+                excel_buffer = convert_df_to_excel_with_sheets(
                     results,
                     schedules_dict,
                     skipped_rows=skipped_rows,
